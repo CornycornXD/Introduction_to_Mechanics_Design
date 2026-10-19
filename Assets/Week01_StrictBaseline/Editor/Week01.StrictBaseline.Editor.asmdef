@@ -1,0 +1,20 @@
+{
+    "name": "Week01.StrictBaseline.Editor",
+    "rootNamespace": "GDEV50024.Week01.EditorTools",
+    "references": [
+        "Week01.StrictBaseline",
+        "Unity.InputSystem",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
