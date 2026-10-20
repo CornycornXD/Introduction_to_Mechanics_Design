@@ -1,4 +1,5 @@
 using System;
+using Unity.VisualScripting;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -34,10 +35,35 @@ public class MovementHandler : MonoBehaviour
         
     }
 
+
     // Update is called once per frame
     void FixedUpdate()
     {
+        //  Normal Horizontal Movement
         _rb.linearVelocity = new Vector2 (_moveInput * _speed, _rb.linearVelocity.y);
+
+        //  Jump Buffering
+
+        
+        //  Coyote Time
+
+
+        //  Anti-Gravity Apex
+
+
+        //  Speed Apex
+
+
+        //  Sticky Feet on Land
+
+
+        //  Corner Clip on Jumps
+
+
+        //  Hold Crouch to Stay on Ledge
+
+
+        //  Variable Jump Strength
     }
 
     public void OnJump(InputAction.CallbackContext context) {
