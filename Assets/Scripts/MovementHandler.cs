@@ -25,6 +25,14 @@ public class MovementHandler : MonoBehaviour
     private float _horizontalInput;
     private bool _jumpPressedSinceLastStep;
 
+    [Header("Spatial Queries")]
+    [SerializeField] private LayerMask _obstacleLayers = 1;
+    [SerializeField, Min(0.001f)] private float _querySkin = 0.01f;
+    private BoxCollider2D _bodyCollider;
+    private ContactFilter2D _solidFilter;
+    private readonly RaycastHit2D[] _castResults = new RaycastHit2D[16];
+    private readonly Collider2D[] _overlapResults = new Collider2D[16];
+
     //  Mechanics group 1
     [Header("Anti-Gravity Apex")]
     [SerializeField, Min(0.1f)] private float _apexSpeedThreshold = 2f;
@@ -45,28 +53,24 @@ public class MovementHandler : MonoBehaviour
     private bool _hasJumpRequest;
     private double _jumpPressedAt;
 
+    //  Mechanics group 3
+    [Header("Corner Clip on Jumps")]
+    [SerializeField, Min(0.01f)] private float _maxFootLift = 0.18f;
+    private bool _cornerCorrected;
+
     private void Awake()
     {
         _rb = GetComponent<Rigidbody2D>();
         _rb.gravityScale = 0f;
         _rb.freezeRotation = true;
+        _bodyCollider = GetComponent<BoxCollider2D>();
+        _solidFilter = new ContactFilter2D { useTriggers = false };
+        _solidFilter.SetLayerMask(_obstacleLayers);
 
         _groundFilter = new ContactFilter2D() { useTriggers = false };
         _groundFilter.SetLayerMask(_groundLayers);
     }
-    //private void OnEnable()
-    //{
-    //    InputHandler.JumpPerformed += Jump;
-    //    InputHandler.MoveLeftPerformed += MoveLeft;
-    //    InputHandler.MoveRightPerformed += MoveRight;
-    //}
 
-    //private void OnDisable()
-    //{
-    //    InputHandler.JumpPerformed -= Jump;
-    //    InputHandler.MoveLeftPerformed -= MoveLeft;
-    //    InputHandler.MoveRightPerformed -= MoveRight;
-    //}
     void Start()
     {
 
@@ -86,6 +90,8 @@ public class MovementHandler : MonoBehaviour
 
         bool isGrounded = CheckGrounded();
 
+        UpdateCoyoteTime(now, isGrounded);
+
         //  Normal Horizontal Movement
         Vector2 velocity = _rb.linearVelocity;
         float speedMultiplier = GetApexSpeedMultiplier(isGrounded, velocity.y);
@@ -94,11 +100,17 @@ public class MovementHandler : MonoBehaviour
         float gravityMultiplier = GetApexGravityMultiplier(isGrounded, velocity.y); 
         velocity.y = Mathf.Max(velocity.y - _gravity * gravityMultiplier * Time.fixedDeltaTime, -_maxFallSpeed);
 
-        if (TryConsumeCoyoteJump(freshPress, isGrounded)) {
+        if (TryConsumeCoyoteJump(freshPress, isGrounded) || TryConsumeBufferedJump(now, isGrounded)) {
             velocity.y = _jumpSpeed;
+
             _apexJumpActive = true;
+
+            _cornerCorrected = false;
+
             isGrounded = false;
         }
+
+        ApplyCornerClip(velocity, isGrounded);
 
         _rb.linearVelocity = velocity;
         //  Jump Buffering
@@ -166,14 +178,6 @@ public class MovementHandler : MonoBehaviour
     }
     //  ---
 
-    //  Platform collision
-    private bool HasCeilingContact() {
-        foreach (ContactPoint2D contact in contacts) {
-            if (contact.normal.y <= -_minGroundNormalY) return true;
-        }
-        return false;
-    }
-
     //  Coyote time
     private void UpdateCoyoteTime(double now, bool isGrounded) {
         if (isGrounded) { 
@@ -192,8 +196,95 @@ public class MovementHandler : MonoBehaviour
         _coyoteAvailable = false;
         return true;
     }
+    //  ---
+
+    //  Jump Buffering
+    private void RecordJumpPress(double now)
+    {
+        _hasJumpRequest = true;
+        _jumpPressedAt = now;
+    }
+
+    private bool TryConsumeBufferedJump(double now, bool isGrounded) {
+        if (!_hasJumpRequest) return false;
+
+        double requestAge = now - _jumpPressedAt;
+
+        if (requestAge > _jumpBufferDuration) {
+            _hasJumpRequest = false;
+            return false;
+        }
+
+        if (!isGrounded) return false;
+
+        _hasJumpRequest = false;
+        return true;
+    }
+    //  ---
+
+    //  Corner Clip on Jumps
+    private bool IsSweepClear(Vector2 offset, Vector2 delta) { 
+        Bounds bodyBounds = _bodyCollider.bounds;
+        
+        Vector2 size = (Vector2)bodyBounds.size - Vector2.one * (2f * _querySkin);
+        Vector2 center = (Vector2)bodyBounds.center + offset;
+
+        int overlaps = Physics2D.OverlapBox(center + delta, size, 0f, _solidFilter, _overlapResults);
+        if (overlaps == _overlapResults.Length) return false;
+        for (int i = 0; i < overlaps; i++) if (_overlapResults[i] != _bodyCollider) return false;
+
+        if (delta.sqrMagnitude == 0f) return true;
+
+        int count = Physics2D.BoxCast(center, size, 0f, delta.normalized, _solidFilter, _castResults, delta.magnitude);
+        if (count == _castResults.Length) return false;
+        for (int i = 0; i < count; i++) if (_castResults[i].collider != _bodyCollider) return false;
+        return true;
+    }
+
+    private void ApplyCornerClip(Vector2 velocity, bool isGrounded) {
+        if (isGrounded) {
+            _cornerCorrected = false;
+            return;
+        }
+        if (_cornerCorrected || velocity.y <= 0 || Mathf.Abs(_horizontalInput) < 0.05f || _horizontalInput * velocity.x <= 0) return;
+
+        Bounds bodyBounds = _bodyCollider.bounds;
+        float direction = Mathf.Sign(velocity.x);
+        Vector2 side = new Vector2(bodyBounds.center.x + direction * (bodyBounds.extents.x - _querySkin), bodyBounds.min.y + _querySkin);
+        float travel = Mathf.Abs(velocity.x) * Time.fixedDeltaTime + 2f * _querySkin;
+        if (!ProbeSolid(side, Vector2.right * direction, travel, out RaycastHit2D hit) || hit.collider == null) return;
+
+        float lift = hit.collider.bounds.max.y - bodyBounds.min.y + 2f * _querySkin;
+        if (lift <= 0 || lift > _maxFootLift) return;
+
+        Vector2 up = Vector2.up * lift;
+        Vector2 forward = Vector2.right * (direction * travel);
+        if (!IsSweepClear(Vector2.zero, up) || !IsSweepClear(up, forward)) return;
+
+        _rb.position += up;
+        _cornerCorrected = true;
+    }
+
+    private bool ProbeSolid(Vector2 origin, Vector2 direction, float distance, out RaycastHit2D hit) {
+        int count = Physics2D.Raycast(origin, direction, _solidFilter, _castResults, distance);
+        if (count == _castResults.Length) {
+            hit = default;
+            return true;
+        }
+        for (int i = 0; i < count; i++) {
+            if (_castResults[i].collider == _bodyCollider) continue;
+            hit = _castResults[i];
+            return true;
+        }
+        hit = default;
+        return false;
+    }
+    //  ---
+
+    //  Bumped Head Correction
 
     //  ---
+    //  Platform Collision
     private bool CheckGrounded() {
         if (_rb.linearVelocity.y > _risingSpeedThreshold) return false;
 
@@ -201,6 +292,15 @@ public class MovementHandler : MonoBehaviour
 
         foreach (ContactPoint2D contact in contacts) {
             if (contact.normal.y >= _minGroundNormalY) return true;
+        }
+        return false;
+    }
+
+    private bool HasCeilingContact()
+    {
+        foreach (ContactPoint2D contact in contacts)
+        {
+            if (contact.normal.y <= -_minGroundNormalY) return true;
         }
         return false;
     }
@@ -214,10 +314,15 @@ public class MovementHandler : MonoBehaviour
     private void ClearInput() {
         _apexJumpActive = false;
 
+        _cornerCorrected = true;
+
         _horizontalInput = 0f;
         _jumpPressedSinceLastStep = false;
 
         _coyoteAvailable = false;
         _lastGroundedAt = 0d;
+
+        _hasJumpRequest = false;
+        _jumpPressedAt = 0d;
     }
 }
