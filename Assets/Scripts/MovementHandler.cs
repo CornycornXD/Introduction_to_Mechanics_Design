@@ -25,6 +25,7 @@ public class MovementHandler : MonoBehaviour
     private float _horizontalInput;
     private bool _jumpPressedSinceLastStep;
 
+    //  Used by 'Corner Clip on Jumps', 'Bumped Head Corrections'
     [Header("Spatial Queries")]
     [SerializeField] private LayerMask _obstacleLayers = 1;
     [SerializeField, Min(0.001f)] private float _querySkin = 0.01f;
@@ -36,11 +37,12 @@ public class MovementHandler : MonoBehaviour
     //  Mechanics group 1
     [Header("Anti-Gravity Apex")]
     [SerializeField, Min(0.1f)] private float _apexSpeedThreshold = 2f;
-    [SerializeField, Range(0.1f, 1f)] private float _apexGravityMultiplier = 0.35f;
     private bool _apexJumpActive;
-    
+    [SerializeField, Range(0.1f, 1f)] private float _apexGravityMultiplier = 0.35f;
+
     [Header("Speed Apex")]
     [SerializeField, Range(1f, 1.5f)] private float _apexSpeedMultiplier = 1.25f;
+
 
     //  Mechanics group 2
     [Header("Coyote Time")]
@@ -58,6 +60,23 @@ public class MovementHandler : MonoBehaviour
     [SerializeField, Min(0.01f)] private float _maxFootLift = 0.18f;
     private bool _cornerCorrected;
 
+    [Header("Bumped Head Correction")]
+    [SerializeField, Min(0.01f)] private float _maxHeadCorrection = 0.16f;
+    [SerializeField, Min(0.005f)] private float _headSearchStep = 0.02f;
+    private bool _headCorrected;
+
+    [Header("Relaxed Semi-Solids")]
+    [SerializeField] private LayerMask _semiSolidLayers;
+    [SerializeField, Min(0.01f)] private float _maxSemLift = 0.12f;
+    [SerializeField, Min(0.1f)] private float _nearApexRiseSpeed = 2f;
+    private bool _jumpHeld;
+    private bool _downHeld;
+    private bool _semiJumpActive;
+    private bool _semiAssistUsed;
+    private ContactFilter2D _semiFilter;
+    private readonly Collider2D[] _semiCandidates = new Collider2D[16];
+    private readonly List<Collider2D> _droppedPlatforms = new List<Collider2D>();
+
     private void Awake()
     {
         _rb = GetComponent<Rigidbody2D>();
@@ -67,8 +86,11 @@ public class MovementHandler : MonoBehaviour
         _solidFilter = new ContactFilter2D { useTriggers = false };
         _solidFilter.SetLayerMask(_obstacleLayers);
 
+        _semiFilter = new ContactFilter2D { useTriggers = false };
+        _semiFilter.SetLayerMask(_semiSolidLayers);
+
         _groundFilter = new ContactFilter2D() { useTriggers = false };
-        _groundFilter.SetLayerMask(_groundLayers);
+        _groundFilter.SetLayerMask(_groundLayers | _semiSolidLayers);
     }
 
     void Start()
@@ -106,11 +128,13 @@ public class MovementHandler : MonoBehaviour
             _apexJumpActive = true;
 
             _cornerCorrected = false;
+            _headCorrected = false;
 
             isGrounded = false;
         }
 
         ApplyCornerClip(velocity, isGrounded);
+        ApplyHeadCorrection(velocity, isGrounded);
 
         _rb.linearVelocity = velocity;
         //  Jump Buffering
@@ -222,7 +246,8 @@ public class MovementHandler : MonoBehaviour
     }
     //  ---
 
-    //  Corner Clip on Jumps
+  
+    //  Used by 'Corner Clip on Jumps', 'Bumped Head Corrections'
     private bool IsSweepClear(Vector2 offset, Vector2 delta) { 
         Bounds bodyBounds = _bodyCollider.bounds;
         
@@ -240,6 +265,27 @@ public class MovementHandler : MonoBehaviour
         for (int i = 0; i < count; i++) if (_castResults[i].collider != _bodyCollider) return false;
         return true;
     }
+
+    private bool ProbeSolid(Vector2 origin, Vector2 direction, float distance, out RaycastHit2D hit)
+    {
+        int count = Physics2D.Raycast(origin, direction, _solidFilter, _castResults, distance);
+        if (count == _castResults.Length)
+        {
+            hit = default;
+            return true;
+        }
+        for (int i = 0; i < count; i++)
+        {
+            if (_castResults[i].collider == _bodyCollider) continue;
+            hit = _castResults[i];
+            return true;
+        }
+        hit = default;
+        return false;
+    }
+    //  ---
+
+    //  Corner Clip on Jumps
 
     private void ApplyCornerClip(Vector2 velocity, bool isGrounded) {
         if (isGrounded) {
@@ -264,25 +310,35 @@ public class MovementHandler : MonoBehaviour
         _rb.position += up;
         _cornerCorrected = true;
     }
-
-    private bool ProbeSolid(Vector2 origin, Vector2 direction, float distance, out RaycastHit2D hit) {
-        int count = Physics2D.Raycast(origin, direction, _solidFilter, _castResults, distance);
-        if (count == _castResults.Length) {
-            hit = default;
-            return true;
-        }
-        for (int i = 0; i < count; i++) {
-            if (_castResults[i].collider == _bodyCollider) continue;
-            hit = _castResults[i];
-            return true;
-        }
-        hit = default;
-        return false;
-    }
     //  ---
 
     //  Bumped Head Correction
+    private void ApplyHeadCorrection(Vector2 velocity, bool isGrounded) {
+        if (isGrounded) {
+            _headCorrected = false;
+            return;
+        }
+        if (_headCorrected || velocity.y <= 0) return;
 
+        Bounds bodyBounds = _bodyCollider.bounds;
+        float rise = velocity.y * Time.fixedDeltaTime + _querySkin;
+        Vector2 top = new Vector2(bodyBounds.center.x, bodyBounds.max.y - _querySkin);
+        float edge = bodyBounds.extents.x - 2f * _querySkin;
+        bool middle = ProbeSolid(top, Vector2.up, rise, out _);
+        bool left = ProbeSolid(top + Vector2.left * edge, Vector2.up, rise, out _);
+        bool right = ProbeSolid(top + Vector2.right * edge, Vector2.up, rise, out _);
+        if (middle || left == right) return;
+
+        float direction = left ? -1 : 1;
+        float step = MathF.Max(0.005f, _headSearchStep);
+        for (float distance = step; distance <= _maxHeadCorrection; distance += step) {
+            Vector2 shift = Vector2.right * (direction * distance);
+            if (!IsSweepClear(Vector2.zero, shift) || !IsSweepClear(shift, Vector2.up * rise)) continue;
+
+            _rb.position += shift;
+            _headCorrected = true;
+        }
+    }
     //  ---
     //  Platform Collision
     private bool CheckGrounded() {
@@ -315,6 +371,7 @@ public class MovementHandler : MonoBehaviour
         _apexJumpActive = false;
 
         _cornerCorrected = true;
+        _headCorrected = true;
 
         _horizontalInput = 0f;
         _jumpPressedSinceLastStep = false;
